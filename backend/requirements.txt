@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-multipart
+unstructured[all-docs]
+unstructured_inference
+langchain
+langchain-core
+langchain-chroma
+langchain-ollama
+chromadb
+python-dotenv
+websockets
+python-magic
+python-magic-bin; platform_system == "Windows"
