@@ -241,3 +241,4 @@ ChromaDB (EMBEDDING_MODEL)                  ← stage: "embedding"
 - **Images** are kept in memory during the server's lifetime. Restart clears them (re-ingest to repopulate).
 - **ChromaDB** is persisted to `./chroma_db/` — data survives restarts.
 - To use a different model, update `LLM_MODEL` or `EMBEDDING_MODEL` in `.env` and restart.
+- Make changes in the file path in the `start.bat` file before using it.
