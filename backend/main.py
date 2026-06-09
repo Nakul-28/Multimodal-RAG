@@ -32,6 +32,7 @@ from rag_engine import (
     ingest_file,
     build_answer_message_content,
     generate_final_answer,
+    rerank_chunks,
     LLM_MODEL,
 )
 
@@ -58,6 +59,7 @@ ingestion_jobs: dict = {}
 chat_history: List = []
 chat_history_version = 0
 chat_history_lock = asyncio.Lock()
+RERANK_CANDIDATE_K = 20
 
 REWRITE_QUERY_SYSTEM_PROMPT = (
     "Given the chat history, rewrite the new question so it is standalone and searchable. "
@@ -267,10 +269,15 @@ async def chat(request: ChatRequest):
 
     vs = get_vectorstore()
     retriever = vs.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": request.k}
+        search_type="mmr",
+        search_kwargs={
+            "k": max(request.k, RERANK_CANDIDATE_K),
+            "fetch_k": max(request.k * 4, RERANK_CANDIDATE_K),
+            "lambda_mult": 0.75,
+        },
     )
-    chunks = await asyncio.to_thread(retriever.invoke, search_query)
+    candidate_chunks = await asyncio.to_thread(retriever.invoke, search_query)
+    chunks = await asyncio.to_thread(rerank_chunks, search_query, candidate_chunks, request.k)
 
     if not chunks:
         return ChatResponse(
@@ -423,9 +430,14 @@ async def chat_stream(request: ChatRequest):
     vs = get_vectorstore()
     retriever = vs.as_retriever(
         search_type="mmr",
-        search_kwargs={"k": request.k, "fetch_k": 10, "lambda_mult": 0.75}
+        search_kwargs={
+            "k": max(request.k, RERANK_CANDIDATE_K),
+            "fetch_k": max(request.k * 4, RERANK_CANDIDATE_K),
+            "lambda_mult": 0.75,
+        },
     )
-    chunks = await asyncio.to_thread(retriever.invoke, search_query)
+    candidate_chunks = await asyncio.to_thread(retriever.invoke, search_query)
+    chunks = await asyncio.to_thread(rerank_chunks, search_query, candidate_chunks, request.k)
 
     if not chunks:
         async def _empty():

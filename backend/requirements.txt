@@ -9,6 +9,7 @@ langchain-chroma
 langchain-ollama
 chromadb
 python-dotenv
+sentence-transformers
 websockets
 python-magic
 python-magic-bin; platform_system == "Windows"

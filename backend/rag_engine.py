@@ -7,6 +7,7 @@ import os
 import uuid
 import base64
 import json
+import re
 from typing import List, Optional, Dict
 from pathlib import Path
 
@@ -31,11 +32,15 @@ load_dotenv()
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-PERSIST_DIRECTORY = "chroma_db"
+BASE_DIR = Path(__file__).resolve().parent
+
+PERSIST_DIRECTORY = str(BASE_DIR / "chroma_db")
 EMBEDDING_MODEL = "nomic-embed-text-v2-moe:latest"
 LLM_MODEL = "deepseek-r1:8b"
 VISION_MODEL = "qwen2.5vl:3b"
 MIN_IMAGE_SIZE = 5000
+MIN_TEXT_CHARS = 100
+RERANKER_MODEL = "BAAI/bge-reranker-base"
 
 ANSWER_SYSTEM_PROMPT = (
     "You are a helpful assistant that answers questions using the provided document context. "
@@ -44,8 +49,20 @@ ANSWER_SYSTEM_PROMPT = (
 )
 
 SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".txt", ".pptx", ".xlsx", ".xls",
-    ".csv", ".html", ".htm", ".md", ".xml", ".json", ".rtf",
+    ".pdf",
+    ".docx",
+    ".doc",
+    ".txt",
+    ".pptx",
+    ".xlsx",
+    ".xls",
+    ".csv",
+    ".html",
+    ".htm",
+    ".md",
+    ".xml",
+    ".json",
+    ".rtf",
 }
 
 
@@ -75,12 +92,97 @@ def get_vectorstore() -> Chroma:
             persist_directory=PERSIST_DIRECTORY,
             embedding_function=embedding_model,
         )
+        print("Persist Directory:", PERSIST_DIRECTORY)
+        try:
+            print("Collection Name:", _vectorstore._collection.name)
+
+            print("Collection Count:", _vectorstore._collection.count())
+        except Exception as e:
+            print("Collection Debug Error:", e)
+        print("ABSOLUTE DB PATH:", PERSIST_DIRECTORY)
     return _vectorstore
 
 
 # ---------------------------------------------------------------------------
 # Document parsing & chunking
 # ---------------------------------------------------------------------------
+def clean_text(text: str) -> str:
+    """Remove extraction noise before text is embedded or sent to the LLM."""
+    if not text:
+        return ""
+
+    cleaned_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            cleaned_lines.append("")
+            continue
+        if re.fullmatch(r"\d{1,4}", line):
+            continue
+        if re.fullmatch(r"(?:[A-Za-z0-9.\[\]/:-]\s+){4,}[A-Za-z0-9.\[\]/:-]?", line):
+            continue
+        if re.fullmatch(r"(?:arXiv|cs\.[A-Z]{2}|stat\.[A-Z]{2}|math\.[A-Z]{2}).*", line, re.IGNORECASE):
+            continue
+        cleaned_lines.append(line)
+
+    cleaned = "\n".join(cleaned_lines)
+    cleaned = re.sub(r"\n\s*\d+\s*\n", "\n", cleaned)
+    cleaned = re.sub(r"\b\d{4}\s+\d\s+0\s+2\b", " ", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def is_useless_text_chunk(text: str, *, has_tables: bool = False, has_images: bool = False) -> bool:
+    """Filter low-value text chunks while keeping meaningful tables and images."""
+    if has_tables or has_images:
+        return False
+
+    normalized = text.strip()
+    if len(normalized) < MIN_TEXT_CHARS:
+        return True
+
+    lower = normalized.lower()
+    words = re.findall(r"[a-zA-Z]{3,}", normalized)
+    if not words:
+        return True
+    if len(words) < 20:
+        return True
+    if lower.startswith(("references", "bibliography")) and len(words) < 80:
+        return True
+    if "copyright" in lower and len(words) < 80:
+        return True
+
+    return False
+
+
+def get_chunk_section(chunk) -> str:
+    """Infer the closest section heading from unstructured chunk metadata."""
+    if hasattr(chunk, "metadata") and hasattr(chunk.metadata, "orig_elements"):
+        for element in chunk.metadata.orig_elements:
+            if type(element).__name__ == "Title":
+                section = clean_text(getattr(element, "text", ""))
+                if section:
+                    return section[:200]
+    first_line = clean_text(getattr(chunk, "text", "")).split(". ")[0]
+    return first_line[:200] if first_line else "Unknown"
+
+
+def get_chunk_page(chunk) -> Optional[int]:
+    """Return the first page number available on a chunk or original element."""
+    metadata = getattr(chunk, "metadata", None)
+    page_number = getattr(metadata, "page_number", None)
+    if page_number is not None:
+        return page_number
+    if metadata is not None and hasattr(metadata, "orig_elements"):
+        for element in metadata.orig_elements:
+            element_page = getattr(getattr(element, "metadata", None), "page_number", None)
+            if element_page is not None:
+                return element_page
+    return None
+
+
 def partition_document(file_path: str):
     """Parse a document using unstructured with PDF-specific options."""
     ext = Path(file_path).suffix.lower()
@@ -88,12 +190,14 @@ def partition_document(file_path: str):
 
     # PDF-specific options for high-quality extraction
     if ext == ".pdf":
-        kwargs.update({
-            "strategy": "hi_res",
-            "infer_table_structure": True,
-            "extract_image_block_types": ["Image"],
-            "extract_image_block_to_payload": True,
-        })
+        kwargs.update(
+            {
+                "strategy": "hi_res",
+                "infer_table_structure": True,
+                "extract_image_block_types": ["Image"],
+                "extract_image_block_to_payload": True,
+            }
+        )
 
     elements = partition(**kwargs)
     return elements
@@ -112,10 +216,12 @@ def create_chunks_by_title(elements):
 def separate_content_types(chunk):
     """Separate text, tables, and images from a chunk."""
     content_data = {
-        "text": chunk.text,
+        "text": clean_text(chunk.text),
         "tables": [],
         "images": [],
         "types": ["text"],
+        "section": get_chunk_section(chunk),
+        "page": get_chunk_page(chunk),
     }
     if hasattr(chunk, "metadata") and hasattr(chunk.metadata, "orig_elements"):
         for element in chunk.metadata.orig_elements:
@@ -125,7 +231,9 @@ def separate_content_types(chunk):
                 table_html = getattr(element.metadata, "text_as_html", element.text)
                 content_data["tables"].append(table_html)
             elif element_type == "Image":
-                if hasattr(element, "metadata") and hasattr(element.metadata, "image_base64"):
+                if hasattr(element, "metadata") and hasattr(
+                    element.metadata, "image_base64"
+                ):
                     content_data["types"].append("image")
                     content_data["images"].append(element.metadata.image_base64)
     content_data["types"] = list(set(content_data["types"]))
@@ -150,7 +258,7 @@ TEXT CONTENT:
         if tables:
             prompt_text += "TABLES:\n"
             for i, table in enumerate(tables):
-                prompt_text += f"Table {i+1}:\n{table}\n\n"
+                prompt_text += f"Table {i + 1}:\n{table}\n\n"
 
         prompt_text += """
 YOUR TASK:
@@ -197,6 +305,12 @@ def summarise_chunks(chunks) -> List[Document]:
     langchain_documents = []
     for chunk in chunks:
         content_data = separate_content_types(chunk)
+        if is_useless_text_chunk(
+            content_data["text"],
+            has_tables=bool(content_data["tables"]),
+            has_images=bool(content_data["images"]),
+        ):
+            continue
 
         if content_data["tables"] or content_data["images"]:
             try:
@@ -218,8 +332,10 @@ def summarise_chunks(chunks) -> List[Document]:
             img_ids.append(img_id)
 
         doc = Document(
-            page_content=enhanced_content,
+            page_content=clean_text(enhanced_content),
             metadata={
+                "section": content_data["section"],
+                "page": content_data["page"] or 0,
                 "original_content": json.dumps(
                     {
                         "raw_text": content_data["text"],
@@ -260,15 +376,62 @@ def ingest_file(
 
     _update_stage("embedding", f"Embedding & vectorizing {Path(file_path).name}...")
     vs = get_vectorstore()
-    vs.add_documents(docs)
+    print(f"Number of chunks: {len(chunks)}")
+    print(f"Number of docs: {len(docs)}")
+
+    if docs:
+        print("First document preview:")
+        print(docs[0].page_content[:500])
+
+    try:
+        print("Collection count BEFORE:", vs._collection.count())
+    except Exception as e:
+        print("Count error before embedding:", e)
+
+    if docs:
+        vs.add_documents(docs)
+
+    try:
+        print("Collection count AFTER:", vs._collection.count())
+    except Exception as e:
+        print("Count error after embedding:", e)
 
     return docs
 
 
 # ---------------------------------------------------------------------------
+# Retrieval reranking
+# ---------------------------------------------------------------------------
+_reranker = None
+
+
+def rerank_chunks(query: str, chunks, top_k: int = 5):
+    """Rerank retrieved chunks with a local cross-encoder when available."""
+    global _reranker
+    if not chunks:
+        return chunks
+
+    try:
+        if _reranker is None:
+            from sentence_transformers import CrossEncoder
+
+            _reranker = CrossEncoder(RERANKER_MODEL)
+        pairs = [(query, chunk.page_content) for chunk in chunks]
+        scores = _reranker.predict(pairs)
+    except Exception as e:
+        print("Reranker unavailable, using vector order:", e)
+        return chunks[:top_k]
+
+    ranked = sorted(zip(chunks, scores), key=lambda item: float(item[1]), reverse=True)
+    return [chunk for chunk, _score in ranked[:top_k]]
+
+
+# ---------------------------------------------------------------------------
 # Answer generation
 # ---------------------------------------------------------------------------
-def build_answer_message_content(chunks, query: str, include_images: bool = True) -> tuple:
+def build_answer_message_content(
+    chunks, query: str, include_images: bool = True
+) -> tuple:
     """Build multimodal prompt content and return it with any referenced image IDs."""
     used_image_ids: List[str] = []
 
@@ -277,7 +440,7 @@ def build_answer_message_content(chunks, query: str, include_images: bool = True
 CONTENT TO ANALYZE:
 """
     for i, chunk in enumerate(chunks):
-        prompt_text += f"--- Document {i+1} ---\n"
+        prompt_text += f"--- Document {i + 1} ---\n"
         if "original_content" in chunk.metadata:
             original_data = json.loads(chunk.metadata["original_content"])
             raw_text = original_data.get("raw_text", "")
@@ -287,7 +450,7 @@ CONTENT TO ANALYZE:
             if tables_html:
                 prompt_text += "TABLES:\n"
                 for j, table in enumerate(tables_html):
-                    prompt_text += f"Table {j+1}:\n{table}\n\n"
+                    prompt_text += f"Table {j + 1}:\n{table}\n\n"
         prompt_text += "\n"
 
     prompt_text += """
@@ -328,14 +491,20 @@ def generate_final_answer(
 
     try:
         llm = ChatOllama(model=LLM_MODEL, temperature=0)
-        message_content, used_image_ids = build_answer_message_content(chunks, query, include_images)
+        message_content, used_image_ids = build_answer_message_content(
+            chunks, query, include_images
+        )
         messages: List = [SystemMessage(content=ANSWER_SYSTEM_PROMPT)]
         if chat_history:
             messages.extend(chat_history)
         messages.append(HumanMessage(content=message_content))
 
         response = llm.invoke(messages)
-        answer_text = response.content if isinstance(response.content, str) else str(response.content)
+        answer_text = (
+            response.content
+            if isinstance(response.content, str)
+            else str(response.content)
+        )
         return answer_text, used_image_ids
 
     except Exception as e:

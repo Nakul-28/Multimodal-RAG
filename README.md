@@ -15,7 +15,7 @@ Multimodal RAG pipeline with a **Next.js** web interface, **FastAPI** backend, *
 ### 1. Pull Ollama models
 
 ```bash
-ollama pull llama3.2:3b
+ollama pull deepseek-r1:8b
 ollama pull nomic-embed-text-v2-moe
 ollama pull qwen2.5vl:3b
 ```
