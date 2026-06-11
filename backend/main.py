@@ -4,7 +4,8 @@ main.py - FastAPI application: server setup, Pydantic models, background
 
 Core RAG pipeline logic lives in rag.py.
 """
-
+import os
+from dotenv import load_dotenv
 import json
 import asyncio
 import uuid
@@ -33,9 +34,11 @@ from rag_engine import (
     build_answer_message_content,
     generate_final_answer,
     rerank_chunks,
-    LLM_MODEL,
+    ANSWER_SYSTEM_PROMPT
 )
+load_dotenv()
 
+LLM_MODEL = os.getenv("LLM_MODEL")
 
 # ----------------------------------------------
 # App & middleware
@@ -59,10 +62,15 @@ ingestion_jobs: dict = {}
 chat_history: List = []
 chat_history_version = 0
 chat_history_lock = asyncio.Lock()
-RERANK_CANDIDATE_K = 20
+RERANK_CANDIDATE_K = 10
 
 REWRITE_QUERY_SYSTEM_PROMPT = (
-    "Given the chat history, rewrite the new question so it is standalone and searchable. "
+    "Given the chat history and the latest user question, rewrite the question "
+    "into a standalone search query suitable for document retrieval. "
+    "Preserve all important entities, technical terms, numbers, acronyms, and references "
+    "resolved from the conversation. "
+    "Do not answer the question. "
+    "Do not add new information. "
     "Return only the rewritten query."
 )
 
@@ -451,11 +459,7 @@ async def chat_stream(request: ChatRequest):
         request.query,
         request.include_images,
     )
-    llm_messages: List = [SystemMessage(content=(
-        "You are a helpful assistant that answers questions using the provided document context. "
-        "Use earlier chat turns only to resolve references in the current question, not to invent facts. "
-        "Base the answer on the retrieved text, tables, and images. If the documents do not contain enough information, say so clearly."
-    ))]
+    llm_messages: List = [SystemMessage(content=(ANSWER_SYSTEM_PROMPT))]
     llm_messages.extend(history)
     llm_messages.append(HumanMessage(content=message_content))
 
@@ -463,7 +467,7 @@ async def chat_stream(request: ChatRequest):
         yield f"data: {json.dumps({'type': 'metadata', 'retrieved_chunks': len(chunks), 'image_ids': used_image_ids})}\n\n"
         answer_parts: List[str] = []
         try:
-            llm = ChatOllama(model=LLM_MODEL, temperature=0)
+            llm = ChatOllama(model=LLM_MODEL, temperature=0,num_ctx=8192)
             for token_chunk in llm.stream(llm_messages):
                 text = token_chunk.content if isinstance(token_chunk.content, str) else str(token_chunk.content)
                 if text:

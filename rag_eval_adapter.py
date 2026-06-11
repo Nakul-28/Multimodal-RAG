@@ -1,10 +1,11 @@
+import time
 from backend.rag_engine import (
     get_vectorstore,
     generate_final_answer,
     rerank_chunks,
 )
 
-RERANK_CANDIDATE_K = 20
+RERANK_CANDIDATE_K = 10
 
 
 def query_rag(question, k=5):
@@ -28,13 +29,54 @@ def query_rag(question, k=5):
         },
     )
 
+
+    t0 = time.time()
+
+    print("START RETRIEVAL")
+
     candidate_chunks = retriever.invoke(question)
-    chunks = rerank_chunks(question, candidate_chunks, k)
+
+    print("RETRIEVAL DONE")
+
+    print(
+        f"Retrieval took "
+        f"{time.time() - t0:.2f}s"
+    )
+
+    print(
+        "Candidate Chunks Retrieved:",
+        len(candidate_chunks)
+    )
+
+    for i, chunk in enumerate(candidate_chunks):
+        print(
+        f"Candidate Chunk {i+1}: "
+        f"{len(chunk.page_content)} chars"
+    )
+    t1 = time.time()
+
+    chunks = rerank_chunks(
+        question,
+        candidate_chunks,
+        k
+    )
+    print("RERANK DONE")
+    print(
+        f"Rerank took "
+        f"{time.time() - t1:.2f}s"
+    )
+
+    t2 = time.time()
 
     answer, _ = generate_final_answer(
         chunks,
         question,
         include_images=True
+    )
+    print("GENERATION DONE")
+    print(
+        f"Generation took "
+        f"{time.time() - t2:.2f}s"
     )
 
     contexts = [

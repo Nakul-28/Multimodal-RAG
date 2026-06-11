@@ -36,17 +36,30 @@ BASE_DIR = Path(__file__).resolve().parent
 
 PERSIST_DIRECTORY = str(BASE_DIR / "chroma_db")
 EMBEDDING_MODEL = "nomic-embed-text-v2-moe:latest"
-LLM_MODEL = "deepseek-r1:8b"
-VISION_MODEL = "qwen2.5vl:3b"
+LLM_MODEL = os.getenv("LLM_MODEL")
+VISION_MODEL = os.getenv("VISION_MODEL")
 MIN_IMAGE_SIZE = 5000
 MIN_TEXT_CHARS = 100
-RERANKER_MODEL = "BAAI/bge-reranker-base"
+RERANKER_MODEL = os.getenv("RERANKER_MODEL")
 
-ANSWER_SYSTEM_PROMPT = (
-    "You are a helpful assistant that answers questions using the provided document context. "
-    "Use earlier chat turns only to resolve references in the current question, not to invent facts. "
-    "Base the answer on the retrieved text, tables, and images. If the documents do not contain enough information, say so clearly."
-)
+ANSWER_SYSTEM_PROMPT = """
+You are a retrieval-augmented question answering assistant.
+
+Answer the user's question ONLY using the information provided in the retrieved document context.
+
+Rules:
+1. Do not use prior knowledge or external information.
+2. Use earlier chat turns only to resolve references in the current question.
+3. Base the answer strictly on the retrieved text, tables, and images.
+4. If the retrieved information does not contain enough information, explicitly state:
+   "The retrieved documents do not contain sufficient information to answer this question."
+5. Do not infer facts that are not directly supported by the retrieved information.
+6. Prefer exact facts, numbers, names, equations, and terminology from the documents.
+7. If information is spread across multiple retrieved passages, combine it into a single coherent answer.
+8. Do not mention "retrieved context" or "documents" unless information is missing.
+9. Keep answers concise but complete.
+10. Never fabricate missing information.
+"""
 
 SUPPORTED_EXTENSIONS = {
     ".pdf",
@@ -434,50 +447,78 @@ def build_answer_message_content(
 ) -> tuple:
     """Build multimodal prompt content and return it with any referenced image IDs."""
     used_image_ids: List[str] = []
-
-    prompt_text = f"""Based on the following documents, please answer this question: {query}
-
-CONTENT TO ANALYZE:
+    prompt_text = f"""
+Question:
+{query}
+Retrieved Information:
 """
     for i, chunk in enumerate(chunks):
-        prompt_text += f"--- Document {i + 1} ---\n"
+        prompt_text += f"\n\n===== SOURCE {i + 1} =====\n"
         if "original_content" in chunk.metadata:
-            original_data = json.loads(chunk.metadata["original_content"])
-            raw_text = original_data.get("raw_text", "")
+            original_data = json.loads(
+                chunk.metadata["original_content"]
+            )
+            raw_text = original_data.get(
+                "raw_text",
+                ""
+            )
             if raw_text:
-                prompt_text += f"TEXT:\n{raw_text}\n\n"
-            tables_html = original_data.get("tables_html", [])
+                prompt_text += (
+                    "TEXT:\n"
+                    f"{raw_text}\n\n"
+                )
+            tables_html = original_data.get(
+                "tables_html",
+                []
+            )
             if tables_html:
                 prompt_text += "TABLES:\n"
                 for j, table in enumerate(tables_html):
-                    prompt_text += f"Table {j + 1}:\n{table}\n\n"
-        prompt_text += "\n"
-
-    prompt_text += """
-Please provide a clear, comprehensive answer using the text, tables, and images above.
-If the documents don't contain sufficient information, say so.
-
-ANSWER:"""
-
-    message_content: List = [{"type": "text", "text": prompt_text}]
-
+                    table_text = str(table)
+                    prompt_text += (
+                        f"Table {j + 1}:\n"
+                        f"{table_text}\n\n"
+                    )
+    print(
+        "Prompt Length:",
+        len(prompt_text)
+    )
+    print(
+        "Approx Tokens:",
+        len(prompt_text) // 4
+    )
+    message_content: List = [
+        {
+            "type": "text",
+            "text": prompt_text,
+        }
+    ]
     if include_images:
         for chunk in chunks:
             if "original_content" in chunk.metadata:
-                original_data = json.loads(chunk.metadata["original_content"])
-                for img_id in original_data.get("image_ids", []):
-                    img_b64 = image_store.get(img_id)
+                original_data = json.loads(
+                    chunk.metadata["original_content"]
+                )
+                for img_id in original_data.get(
+                    "image_ids",
+                    []
+                ):
+                    img_b64 = image_store.get(
+                        img_id
+                    )
                     if img_b64:
-                        used_image_ids.append(img_id)
+                        used_image_ids.append(
+                            img_id
+                        )
                         message_content.append(
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/jpeg;base64,{img_b64}"
+                                    "url":
+                                    f"data:image/jpeg;base64,{img_b64}"
                                 },
                             }
                         )
-
     return message_content, used_image_ids
 
 
@@ -490,7 +531,7 @@ def generate_final_answer(
     """Generate an answer from retrieved chunks. Returns (answer_text, list_of_image_ids_used)."""
 
     try:
-        llm = ChatOllama(model=LLM_MODEL, temperature=0)
+        llm = ChatOllama(model=LLM_MODEL, temperature=0, num_ctx=8192)
         message_content, used_image_ids = build_answer_message_content(
             chunks, query, include_images
         )
@@ -498,7 +539,8 @@ def generate_final_answer(
         if chat_history:
             messages.extend(chat_history)
         messages.append(HumanMessage(content=message_content))
-
+        print("Prompt Length:",len(str(message_content)))
+        print("Approx Tokens:",len(str(message_content)) //4)
         response = llm.invoke(messages)
         answer_text = (
             response.content
