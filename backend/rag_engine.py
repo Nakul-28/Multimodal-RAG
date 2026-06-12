@@ -20,6 +20,7 @@ from langchain_core.documents import Document
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_community.retrievers import BM25Retriever
 
 from dotenv import load_dotenv
 
@@ -89,30 +90,44 @@ def is_supported_file(filename: str) -> bool:
 # ---------------------------------------------------------------------------
 image_store: Dict[str, str] = {}
 
+# ---------------------------------------------------------------------------
+# Declaring Global Variables
+# ---------------------------------------------------------------------------
+_vectorstore: Optional[Chroma] = None
+_bm25_retriever = None
+_all_documents = []
 
 # ---------------------------------------------------------------------------
 # Vector store (singleton pattern)
 # ---------------------------------------------------------------------------
-_vectorstore: Optional[Chroma] = None
-
-
 def get_vectorstore() -> Chroma:
-    """Get or create the Chroma vector store."""
-    global _vectorstore
+    global _vectorstore, _bm25_retriever, _all_documents
+
     if _vectorstore is None:
         embedding_model = OllamaEmbeddings(model=EMBEDDING_MODEL)
         _vectorstore = Chroma(
             persist_directory=PERSIST_DIRECTORY,
             embedding_function=embedding_model,
         )
-        print("Persist Directory:", PERSIST_DIRECTORY)
-        try:
-            print("Collection Name:", _vectorstore._collection.name)
 
-            print("Collection Count:", _vectorstore._collection.count())
-        except Exception as e:
-            print("Collection Debug Error:", e)
-        print("ABSOLUTE DB PATH:", PERSIST_DIRECTORY)
+        # ── NEW: Rebuild BM25 from persisted ChromaDB docs ──
+        if _bm25_retriever is None:
+            try:
+                result = _vectorstore.get(include=["documents", "metadatas"])
+                if result["documents"]:
+                    _all_documents = [
+                        Document(page_content=doc, metadata=meta)
+                        for doc, meta in zip(result["documents"], result["metadatas"])
+                    ]
+                    _bm25_retriever = BM25Retriever.from_documents(_all_documents)
+                    _bm25_retriever.k = 10
+                    print(f"BM25 rebuilt from ChromaDB: {len(_all_documents)} docs")
+                else:
+                    print("ChromaDB empty — BM25 not initialized")
+            except Exception as e:
+                print(f"BM25 rebuild failed: {e}")
+        # ─────────────────────────────────────────────────────
+
     return _vectorstore
 
 
@@ -274,17 +289,17 @@ TEXT CONTENT:
                 prompt_text += f"Table {i + 1}:\n{table}\n\n"
 
         prompt_text += """
-YOUR TASK:
-Generate a comprehensive, searchable description that covers:
-1. Key facts, numbers, and data points from text and tables
-2. Main topics and concepts discussed
-3. Questions this content could answer
-4. Visual content analysis (charts, diagrams, patterns in images)
-5. Alternative search terms users might use
+                        YOUR TASK:
+                        Generate a comprehensive, searchable description that covers:
+                        1. Key facts, numbers, and data points from text and tables
+                        2. Main topics and concepts discussed
+                        3. Questions this content could answer
+                        4. Visual content analysis (charts, diagrams, patterns in images)
+                        5. Alternative search terms users might use
 
-Make it detailed and searchable - prioritize findability over brevity.
+                        Make it detailed and searchable - prioritize findability over brevity.
 
-SEARCHABLE DESCRIPTION:"""
+                        SEARCHABLE DESCRIPTION:"""
 
         message_content: List = [{"type": "text", "text": prompt_text}]
         for image_base64 in images:
@@ -316,6 +331,7 @@ SEARCHABLE DESCRIPTION:"""
 def summarise_chunks(chunks) -> List[Document]:
     """Process chunks into LangChain Documents with enhanced summaries."""
     langchain_documents = []
+    content_data = dict()
     for chunk in chunks:
         content_data = separate_content_types(chunk)
         if is_useless_text_chunk(
@@ -324,19 +340,37 @@ def summarise_chunks(chunks) -> List[Document]:
             has_images=bool(content_data["images"]),
         ):
             continue
+        
+        search_summary = ""
 
         if content_data["tables"] or content_data["images"]:
             try:
-                enhanced_content = create_ai_enhanced_summary(
-                    content_data["text"],
-                    content_data["tables"],
-                    content_data["images"],
+                search_summary = create_ai_enhanced_summary(
+                content_data["text"],
+                content_data["tables"],
+                content_data["images"],
                 )
             except Exception:
-                enhanced_content = content_data["text"]
-        else:
-            enhanced_content = content_data["text"]
+                search_summary = ""
 
+        table_text = "\n".join(
+            str(table)
+            for table in content_data["tables"]
+        )
+
+        enhanced_content = f"""
+                            SECTION: {content_data['section']}
+                            PAGE: {content_data['page']}
+
+                            TEXT:
+                            {content_data['text']}
+
+                            TABLES:
+                            {table_text}
+
+                            KEYWORDS:
+                            {search_summary}
+                            """
         # Persist images to in-memory store and record their IDs
         img_ids = []
         for img_b64 in content_data["images"]:
@@ -349,6 +383,7 @@ def summarise_chunks(chunks) -> List[Document]:
             metadata={
                 "section": content_data["section"],
                 "page": content_data["page"] or 0,
+                "search_summary": search_summary,
                 "original_content": json.dumps(
                     {
                         "raw_text": content_data["text"],
@@ -372,6 +407,9 @@ def ingest_file(
     ingestion_jobs: Optional[dict] = None,
 ) -> List[Document]:
     """Parse, chunk, summarise, and embed a single file into the vector store."""
+    global _bm25_retriever
+    global _all_documents
+
 
     def _update_stage(stage: str, message: str):
         if job_id and ingestion_jobs and job_id in ingestion_jobs:
@@ -388,7 +426,15 @@ def ingest_file(
     docs = summarise_chunks(chunks)
 
     _update_stage("embedding", f"Embedding & vectorizing {Path(file_path).name}...")
+    
     vs = get_vectorstore()
+    
+    _all_documents.extend(docs)
+    _bm25_retriever = BM25Retriever.from_documents(_all_documents)
+
+    _bm25_retriever.k = 10
+
+    print(f"BM25 initialized with {len(docs)} documents")
     print(f"Number of chunks: {len(chunks)}")
     print(f"Number of docs: {len(docs)}")
 
@@ -410,6 +456,13 @@ def ingest_file(
         print("Count error after embedding:", e)
 
     return docs
+# --------------------------------------------------------------------------
+# BM-25 Helper Function
+# --------------------------------------------------------------------------
+def get_bm25_retriever():
+    global _bm25_retriever
+    return _bm25_retriever
+
 
 
 # ---------------------------------------------------------------------------
@@ -443,17 +496,44 @@ def rerank_chunks(query: str, chunks, top_k: int = 5):
 # Answer generation
 # ---------------------------------------------------------------------------
 def build_answer_message_content(
-    chunks, query: str, include_images: bool = True
+    chunks,
+    query: str,
+    include_images: bool = True,
+    rewritten_query: Optional[str] = None
 ) -> tuple:
     """Build multimodal prompt content and return it with any referenced image IDs."""
     used_image_ids: List[str] = []
     prompt_text = f"""
-Question:
-{query}
-Retrieved Information:
-"""
+    Original User Question:
+    {query}
+    """
+
+    if rewritten_query and rewritten_query != query:
+        prompt_text += f"""
+
+    Resolved Standalone Question:
+    {rewritten_query}
+    """
+
+    prompt_text += """
+
+    Retrieved Information:
+    """
     for i, chunk in enumerate(chunks):
-        prompt_text += f"\n\n===== SOURCE {i + 1} =====\n"
+        section = chunk.metadata.get(
+            "section",
+            "Unknown"
+        )
+        page = chunk.metadata.get(
+            "page",
+            "Unknown"
+        )
+        prompt_text += (
+                    f"\n\n===== SOURCE {i + 1} =====\n"
+                    f"Section: {section}\n"
+                    f"Page: {page}\n"
+                    f"----------------------------------\n"
+                    )
         if "original_content" in chunk.metadata:
             original_data = json.loads(
                 chunk.metadata["original_content"]
@@ -527,14 +607,13 @@ def generate_final_answer(
     query: str,
     include_images: bool = True,
     chat_history: Optional[List] = None,
+    rewritten_query: Optional[str] = None,
 ) -> tuple:
     """Generate an answer from retrieved chunks. Returns (answer_text, list_of_image_ids_used)."""
 
     try:
         llm = ChatOllama(model=LLM_MODEL, temperature=0, num_ctx=8192)
-        message_content, used_image_ids = build_answer_message_content(
-            chunks, query, include_images
-        )
+        message_content, used_image_ids = build_answer_message_content(chunks,query,include_images,rewritten_query)
         messages: List = [SystemMessage(content=ANSWER_SYSTEM_PROMPT)]
         if chat_history:
             messages.extend(chat_history)
