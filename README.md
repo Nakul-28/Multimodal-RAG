@@ -1,6 +1,6 @@
-# RAG Pipeline
+# Multimodal RAG Pipeline
 
-Multimodal RAG pipeline with a **Next.js** web interface, **FastAPI** backend, **LangChain**, **ChromaDB**, and **Ollama**. Upload documents (PDF, DOCX, TXT, PPTX, and more), watch the pipeline process them in real-time, and chat with your documents.
+A fully **local**, full-stack Multimodal RAG system — **Next.js** frontend, **FastAPI** backend, **LangChain**, **ChromaDB**, and **Ollama**. Upload documents (PDF, DOCX, PPTX, and more), watch them process in real-time, and chat with your documents with no cloud API dependency.
 
 ---
 
@@ -15,9 +15,9 @@ Multimodal RAG pipeline with a **Next.js** web interface, **FastAPI** backend, *
 ### 1. Pull Ollama models
 
 ```bash
-ollama pull deepseek-r1:8b
-ollama pull nomic-embed-text-v2-moe
-ollama pull qwen2.5vl:3b
+ollama pull qwen2.5:7b              # LLM for chat answers and query rewriting
+ollama pull nomic-embed-text-v2-moe # Embedding model (MoE)
+ollama pull qwen2.5vl:3b            # Vision model for image/table summarization
 ```
 
 > Models are configurable via `.env` — see [Configuration](#configuration).
@@ -31,7 +31,7 @@ pip install -r requirements.txt
 ### 3. Start the backend
 
 ```bash
-uvicorn rag:app --host 127.0.0.1 --port 8000 --reload
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 ### 4. Start the frontend
@@ -47,27 +47,85 @@ npm run dev
 Navigate to **http://localhost:3000**
 
 - **Left sidebar** — drag-and-drop files, watch real-time pipeline stages (Parsing → Chunking → Summarizing → Embedding → Done)
-- **Main area** — chat with your documents, answers stream token-by-token, images display inline
+- **Main area** — chat with your documents; answers stream token-by-token, images display inline
 
-> **Tip:** You can also run both servers at once with `start.bat` (Windows).
+> **Tip:** Run both servers at once with `start.bat` (Windows).
 
 ---
 
 ## Supported File Types
-
-The pipeline accepts any file type supported by [Unstructured](https://docs.unstructured.io/):
 
 | Category | Extensions |
 |----------|-----------|
 | Documents | `.pdf`, `.docx`, `.doc`, `.odt`, `.rtf` |
 | Presentations | `.pptx`, `.ppt` |
 | Spreadsheets | `.xlsx`, `.xls`, `.csv`, `.tsv` |
-| Text | `.txt`, `.md`, `.rst`, `.org` |
+| Text | `.txt`, `.md`, `.rst` |
 | Web | `.html`, `.htm`, `.xml` |
-| Email | `.eml`, `.msg` |
-| Other | `.epub`, `.json` |
+| Data | `.json` |
 
-PDFs get enhanced processing with high-resolution parsing, table structure inference, and image extraction. Other formats use Unstructured's auto-detection.
+PDFs receive enhanced processing: high-resolution parsing, table structure inference, and embedded image extraction. Other formats use Unstructured's auto-detection.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         INGESTION PIPELINE                       │
+└─────────────────────────────────────────────────────────────────┘
+
+Document Upload (PDF, DOCX, PPTX, ...)
+   │
+   ▼
+[1] PARSING — unstructured partition()                ← stage: "parsing"
+   │  PDFs: hi_res strategy, infer_table_structure,
+   │        extract_image_block_to_payload
+   │  Others: auto-detected format parsing
+   ▼
+[2] CHUNKING — chunk_by_title()                      ← stage: "chunking"
+   │  max 3000 chars, combine under 500, noise filtering
+   ▼
+[3] AI SUMMARIZATION — Qwen2.5-VL 3B (Vision)       ← stage: "summarizing"
+   │  Chunks containing tables/images → LLM generates
+   │  a searchable description covering key facts,
+   │  concepts, and alternative search terms
+   ▼
+[4] EMBEDDING & INDEXING                             ← stage: "embedding"
+   │  ChromaDB — nomic-embed-text-v2-moe (MoE model)
+   │  BM25 index — updated with every new document
+   ▼
+   Persisted to ./chroma_db/
+
+┌─────────────────────────────────────────────────────────────────┐
+│                          QUERY PIPELINE                          │
+└─────────────────────────────────────────────────────────────────┘
+
+User Query + Chat History
+   │
+   ▼
+[1] QUERY REWRITING (if history exists)
+   │  LLM resolves pronouns and references into a
+   │  standalone search query; preserves technical terms,
+   │  equations, model names, and section numbers
+   ▼
+[2] HYBRID RETRIEVAL
+   │  Dense: ChromaDB MMR (lambda=0.75, fetch_k = k×4)
+   │  Sparse: BM25 lexical retrieval
+   │  → deduplicated union of candidates
+   ▼
+[3] CROSS-ENCODER RERANKING
+   │  sentence-transformers CrossEncoder re-scores
+   │  all candidates; top-k selected
+   ▼
+[4] MULTIMODAL ANSWER GENERATION
+   │  System prompt: 10-rule grounded answering policy
+   │  Context: raw text + HTML tables + base64 images
+   │  LLM (8192 token context window), temperature=0
+   ▼
+SSE token stream → Next.js frontend (typewriter effect)
+Inline images served via /images/{id}
+```
 
 ---
 
@@ -75,170 +133,167 @@ PDFs get enhanced processing with high-resolution parsing, table structure infer
 
 ```
 ├── backend/
-│   ├── main.py             # FastAPI entrypoint (if present)
-│   ├── rag.py              # FastAPI backend — API, pipeline, WebSocket, SSE
+│   ├── main.py             # FastAPI app — endpoints, WebSocket, SSE, chat history
+│   ├── rag_engine.py       # Full RAG pipeline — ingest, retrieve, rerank, generate
 │   ├── requirements.txt    # Python dependencies
 │   ├── .env                # Model & server configuration
 │   ├── chroma_db/          # Persisted ChromaDB vector store
 │   ├── uploads/            # Uploaded files
-│   └── __init__.py         # Marks backend as a Python package
-├── frontend/               # Next.js web interface
+│   └── __init__.py
+├── evaluation/
+│   ├── eval_rag_system.py  # RAGAS evaluation runner (local judge LLM)
+│   ├── rag_eval_adapter.py # Bridges query_rag() to the evaluation harness
+│   ├── rag_benchmark_50q.json  # 50-question benchmark with reference answers
+│   ├── rag_outputs.json    # Cached RAG outputs (auto-generated)
+│   └── evaluation_results.json # Final RAGAS scores (auto-generated)
+├── frontend/
 │   ├── app/
-│   │   ├── layout.tsx      # Root layout
-│   │   ├── page.tsx        # Main two-panel page
-│   │   └── globals.css     # Tailwind + custom styles
+│   │   ├── layout.tsx
+│   │   ├── page.tsx
+│   │   └── globals.css
 │   ├── components/
-│   │   ├── ChatWindow.tsx  # Chat with streaming + markdown + images
-│   │   ├── UploadPanel.tsx # Drag-drop upload + WebSocket status
+│   │   ├── ChatWindow.tsx      # Streaming chat + markdown + inline images
+│   │   ├── UploadPanel.tsx     # Drag-drop upload + WebSocket status
 │   │   └── PipelineStatus.tsx  # Step-by-step pipeline indicator
 │   ├── lib/
-│   │   ├── api.ts          # API client (upload, WebSocket, SSE, images)
-│   │   └── types.ts        # TypeScript type definitions
-│   └── .env.local          # NEXT_PUBLIC_API_URL=http://localhost:8000
-└── start.bat               # Launch both backend + frontend (Windows)
+│   │   ├── api.ts
+│   │   └── types.ts
+│   └── .env.local
+└── start.bat
 ```
 
 ---
 
 ## Features
 
-### Web Interface
-- **Real-time pipeline tracking** — WebSocket pushes stage updates as each file is processed (parsing, chunking, summarizing, embedding, done)
-- **Streaming chat** — LLM responses stream token-by-token via SSE with a typewriter effect
-- **Markdown rendering** — chat answers render with full markdown support (tables, code, lists)
-- **Image display** — images extracted from PDFs display inline in chat responses
-- **Multi-format upload** — drag-and-drop any supported file type (PDF, DOCX, TXT, PPTX, XLSX, CSV, HTML, MD, and more)
-- **Batch upload** — upload multiple files at once with per-file progress tracking
-- **Responsive design** — collapsible sidebar on mobile
+### Ingestion
+- **Multi-format parsing** via Unstructured — PDFs use hi-res strategy with table structure inference and image extraction; other formats use auto-detection
+- **AI-enhanced chunk summaries** — Qwen2.5-VL 3B generates searchable descriptions for any chunk containing tables or images, improving retrieval precision for multimodal content
+- **Noise filtering** — low-value chunks (page numbers, reference stubs, copyright footers) are dropped before embedding
+- **Real-time status** — WebSocket pushes stage-by-stage progress to the frontend
 
-### Backend
-- **Multi-format document ingestion** — auto-detects file type via Unstructured; PDFs get hi-res extraction of text, tables (HTML), and images (base64)
-- **AI-enhanced summaries** — LLM creates searchable descriptions for chunks with tables/images
-- **Semantic search** — ChromaDB with configurable embedding model, cosine similarity
-- **WebSocket endpoint** — `/ws/status/{job_id}` for live pipeline stage updates
-- **SSE streaming** — `/chat/stream` for token-by-token chat responses
-- **Configurable models** — LLM and embedding model names loaded from `.env`
+### Retrieval
+- **Hybrid BM25 + dense retrieval** — lexical BM25 and MMR-based dense retrieval run in parallel; results are deduplicated and merged
+- **Cross-encoder reranking** — a sentence-transformers CrossEncoder re-scores all candidates; top-k are passed to the LLM
+- **Conversational query rewriting** — on follow-up questions, an LLM rewrites the query into a standalone search string, preserving technical terms, equations, and section references
+- **MMR diversity** — `lambda_mult=0.75` balances relevance and coverage
+
+### Generation
+- **Strictly grounded answers** — 10-rule system prompt forbids the LLM from using prior knowledge, hallucinating facts, or fabricating missing information
+- **Multimodal context** — raw text, HTML tables, and base64-encoded images all passed in a single multimodal prompt
+- **SSE streaming** — token-by-token response via Server-Sent Events; first event delivers metadata (chunk count, image IDs)
+- **Chat history** — server-side conversation memory with optimistic concurrency (version-locked appends)
+
+### Frontend
+- Token-by-token typewriter streaming
+- Full markdown rendering (tables, code blocks, lists)
+- Inline image display from extracted PDF figures
+- Drag-and-drop multi-file upload with per-file progress
+
+---
+
+## Evaluation
+
+The system was benchmarked using **RAGAS** on a hand-crafted 50-question dataset, with **Qwen2.5 7B as the local judge LLM** (no OpenAI / cloud APIs).
+
+| Metric | Score |
+|--------|-------|
+| Faithfulness | **0.897** |
+| Context Precision | **0.835** |
+| Context Recall | **0.842** |
+| Answer Relevancy | **0.826** |
+| Answer Similarity | **0.827** |
+| Answer Correctness | **0.760** |
+| Hallucination Rate | 10.3% |
+| Avg Generation Latency | 23.2s |
+
+> All inference is fully local — generation model, vision model, embedding model, and judge LLM run entirely on-device via Ollama. Answer correctness and hallucination rate reflect the ceiling imposed by a 3B-parameter generation model rather than retrieval quality.
+
+### Running the Evaluation
+
+```bash
+# From the evaluation/ directory
+python eval_rag_system.py
+```
+
+Results are cached to `rag_outputs.json` after generation and to `evaluation_results.json` after scoring. Re-runs skip generation and go straight to scoring unless the cache is deleted.
 
 ---
 
 ## Configuration
 
-All model and server settings are configured via the `.env` file in the project root:
+All model and server settings live in `.env`:
 
 ```env
-# LLM used for summaries and chat answers
-LLM_MODEL=llama3.2:3b
+# ─────────────────────────────────────────────
+# Ollama Models
+# ─────────────────────────────────────────────
 
-# Embedding model for vector store
+# LLM for chat answers and query rewriting
+LLM_MODEL=qwen2.5:7b
+
+# MoE embedding model for vector store
 EMBEDDING_MODEL=nomic-embed-text-v2-moe:latest
 
-# Vision model to summarise Tables and Images
+# Vision model for image/table chunk summarization at ingestion time
 VISION_MODEL=qwen2.5vl:3b
 
+# HuggingFace cross-encoder for retrieval reranking
+RERANKER_MODEL=BAAI/bge-reranker-base
+
+# ─────────────────────────────────────────────
 # Server
+# ─────────────────────────────────────────────
 HOST=127.0.0.1
 PORT=8000
+
+# ─────────────────────────────────────────────
+# HuggingFace (required for reranker model download)
+# ─────────────────────────────────────────────
+HF_TOKEN=your_hf_token_here
 ```
 
-Frontend configuration is in `frontend/.env.local`:
+> **Never commit your real `HF_TOKEN` to version control.** Add `.env` to `.gitignore`.
+
+Frontend config in `frontend/.env.local`:
 
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:8000
-```
-
-| Variable | File | Default | Description |
-|----------|------|---------|-------------|
-| `LLM_MODEL` | `.env` | `llama3.2:3b` | Ollama model for summaries & chat |
-| `EMBEDDING_MODEL` | `.env` | `nomic-embed-text-v2-moe:latest` | Ollama embedding model for vector store |
-| `VISION_MODEL` | `.env` | `qwen2.5-vl:3b` | Ollama model for summarising tables & images|
-| `HOST` | `.env` | `127.0.0.1` | Backend server host |
-| `PORT` | `.env` | `8000` | Backend server port |
-| `NEXT_PUBLIC_API_URL` | `frontend/.env.local` | `http://localhost:8000` | Backend URL for the frontend |
-
-To swap models, edit `.env` and restart the backend. For example, to use a vision-capable model:
-
-```env
-LLM_MODEL=llava:13b
 ```
 
 ---
 
 ## API Reference
 
-### `POST /upload` — Upload a document
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/upload` | Upload and ingest a single document |
+| `POST` | `/upload/batch` | Upload and ingest multiple documents |
+| `GET` | `/status/{job_id}` | Poll ingestion status |
+| `WS` | `/ws/status/{job_id}` | Live WebSocket ingestion stages |
+| `POST` | `/chat` | Full Q&A response |
+| `POST` | `/chat/stream` | SSE streaming Q&A |
+| `POST` | `/chat/clear` | Clear server-side chat history |
+| `GET` | `/documents` | List all uploaded documents |
+| `GET` | `/images/{image_id}` | Retrieve an extracted image (JPEG) |
+| `GET` | `/images` | List all image IDs in memory |
+| `GET` | `/health` | Health check (vector count, image count, active jobs) |
 
-Supports all [supported file types](#supported-file-types).
-
-```bash
-curl -X POST http://localhost:8000/upload -F "file=@document.pdf"
-```
-
-### `POST /upload/batch` — Batch upload
-
-```bash
-curl -X POST http://localhost:8000/upload/batch \
-  -F "files=@doc1.pdf" -F "files=@report.docx" -F "files=@notes.txt"
-```
-
-### `GET /status/{job_id}` — Ingestion status
-
-Returns `{ job_id, status, stage, message, files_processed, total_files, current_file }`.
-
-Stages: `pending` → `parsing` → `chunking` → `summarizing` → `embedding` → `done`
-
-### `WS /ws/status/{job_id}` — WebSocket live status
-
-Connects and pushes JSON status updates every 0.5s until done/failed.
-
-### `POST /chat` — Ask a question (full response)
+### Chat Request
 
 ```bash
-curl -X POST http://localhost:8000/chat \
+curl -X POST http://localhost:8000/chat/stream \
   -H "Content-Type: application/json" \
-  -d '{"query": "What does the document say about X?", "k": 3}'
+  -d '{"query": "What does the document say about X?", "k": 5}'
 ```
 
-### `POST /chat/stream` — Ask a question (SSE streaming)
-
-Returns `text/event-stream`. Events:
-1. `{"type": "metadata", "retrieved_chunks": 3, "image_ids": [...]}`
-2. `{"type": "token", "content": "..."}` (repeated)
-3. `[DONE]`
-
-### `GET /images/{image_id}` — Retrieve an extracted image (JPEG)
-
-### `GET /images` — List all image IDs
-
-### `GET /health` — Health check
+SSE events: `metadata` → repeated `token` → `[DONE]`
 
 ---
 
-## Architecture
-
-```
-Document Upload (PDF, DOCX, TXT, PPTX, ...)
-   │
-   ▼
-partition (unstructured, auto-detect)        ← stage: "parsing"
-   │  PDFs: hi_res strategy, table + image extraction
-   │  Others: auto-detected format parsing
-   ▼
-chunk_by_title (unstructured)                ← stage: "chunking"
-   │  max 3000 chars per chunk
-   ▼
-AI Summary (LLM_MODEL)                      ← stage: "summarizing"
-   │  multimodal: text + tables + images → searchable description
-   ▼
-ChromaDB (EMBEDDING_MODEL)                  ← stage: "embedding"
-   │  cosine similarity
-   ▼
-/chat/stream → retrieve top-k → LLM → SSE token stream
-                              └─→ image_ids for inline display
-```
-
 ## Notes
 
-- **Images** are kept in memory during the server's lifetime. Restart clears them (re-ingest to repopulate).
-- **ChromaDB** is persisted to `./chroma_db/` — data survives restarts.
-- To use a different model, update `LLM_MODEL` or `EMBEDDING_MODEL` in `.env` and restart.
-- Make changes in the file path in the `start.bat` file before using it.
+- **Images** are held in memory for the server's lifetime; re-ingest to repopulate after a restart.
+- **ChromaDB** persists to `./chroma_db/` and survives restarts.
+- **BM25 index** is rebuilt in memory on each server start as documents are ingested; it does not persist across restarts.
+- Edit `start.bat` file paths before using it on Windows.
