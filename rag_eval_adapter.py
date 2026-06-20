@@ -3,6 +3,7 @@ from backend.rag_engine import (
     get_vectorstore,
     generate_final_answer,
     rerank_chunks,
+    get_bm25_retriever
 )
 
 RERANK_CANDIDATE_K = 10
@@ -33,8 +34,18 @@ def query_rag(question, k=5):
     t0 = time.time()
 
     print("START RETRIEVAL")
-
-    candidate_chunks = retriever.invoke(question)
+    
+    dense_chunks = retriever.invoke(question)
+    bm25_retriever = get_bm25_retriever()
+    bm25_chunks = []
+    if bm25_retriever:
+        bm25_chunks = bm25_retriever.invoke(question)
+    combined = {}
+    for chunk in dense_chunks:
+        combined[chunk.page_content] = chunk
+    for chunk in bm25_chunks:
+        combined[chunk.page_content] = chunk
+    candidate_chunks = list(combined.values())
 
     print("RETRIEVAL DONE")
 

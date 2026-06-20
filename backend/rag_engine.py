@@ -10,7 +10,7 @@ import json
 import re
 from typing import List, Optional, Dict
 from pathlib import Path
-
+from bs4 import BeautifulSoup
 # Unstructured for document parsing
 from unstructured.partition.auto import partition
 from unstructured.chunking.title import chunk_by_title
@@ -160,6 +160,15 @@ def clean_text(text: str) -> str:
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
+
+def strip_html_from_chunk(text: str) -> str:
+    # Parse and extract plain text from any HTML blocks
+    if "<table" in text.lower():
+        soup = BeautifulSoup(text, "html.parser")
+        text = soup.get_text(separator=" ", strip=True)
+    # Collapse repeated whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 def is_useless_text_chunk(text: str, *, has_tables: bool = False, has_images: bool = False) -> bool:
@@ -393,6 +402,7 @@ def summarise_chunks(chunks) -> List[Document]:
                 )
             },
         )
+        doc.page_content = strip_html_from_chunk(doc.page_content)
         langchain_documents.append(doc)
 
     return langchain_documents

@@ -66,12 +66,18 @@ RERANK_CANDIDATE_K = 10
 
 REWRITE_QUERY_SYSTEM_PROMPT = (
     "Given the chat history and the latest user question, rewrite the question "
-    "into a standalone search query suitable for document retrieval. "
-    "Preserve all important entities, technical terms, numbers, acronyms, and references "
-    "resolved from the conversation. "
-    "Do not answer the question. "
-    "Do not add new information. "
-    "Return only the rewritten query."
+    "into a standalone search query for document retrieval.\n\n"
+    
+    "Rules:\n"
+    "- Resolve pronouns and references using the chat history.\n"
+    "- Preserve all technical terms exactly.\n"
+    "- Preserve model names, datasets, metrics, equations, acronyms, and parameter names.\n"
+    "- Preserve section numbers, subsection numbers, table numbers, figure numbers, and row references.\n"
+    "- Preserve symbols and notation mentioned in the document.\n"
+    "- Do not answer the question.\n"
+    "- Do not summarize the question.\n"
+    "- Do not add information not present in the conversation.\n"
+    "- Return only the rewritten query.\n"
 )
 
 
@@ -300,6 +306,7 @@ async def chat(request: ChatRequest):
         request.query,
         request.include_images,
         history,
+        search_query,
     )
     await append_chat_turn(request.query, answer, history_version)
 
@@ -454,11 +461,7 @@ async def chat_stream(request: ChatRequest):
             yield "data: [DONE]\n\n"
         return StreamingResponse(_empty(), media_type="text/event-stream")
 
-    message_content, used_image_ids = build_answer_message_content(
-        chunks,
-        request.query,
-        request.include_images,
-    )
+    message_content, used_image_ids = (build_answer_message_content(chunks,request.query,request.include_images,search_query,)  )
     llm_messages: List = [SystemMessage(content=(ANSWER_SYSTEM_PROMPT))]
     llm_messages.extend(history)
     llm_messages.append(HumanMessage(content=message_content))

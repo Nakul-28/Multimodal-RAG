@@ -1,15 +1,46 @@
-fastapi
-uvicorn[standard]
-python-multipart
-unstructured[all-docs]
-unstructured_inference
-langchain
-langchain-core
-langchain-chroma
-langchain-ollama
-chromadb
-python-dotenv
-sentence-transformers
-websockets
-python-magic
-python-magic-bin; platform_system == "Windows"
+# Backend API
+fastapi==0.136.3            
+uvicorn[standard]==0.49.0     
+python-multipart==0.0.32  
+
+# Document Parsing & Ingestion
+unstructured[all-docs]==0.22.32  
+unstructured-inference==1.6.11  
+python-magic==0.4.27             
+python-magic-bin; platform_system == "Windows" 
+
+# LangChain Ecosystem
+langchain==0.3.26               
+langchain-core==0.3.75          
+langchain-chroma==0.2.5         
+langchain-ollama==0.2.3        
+langchain-openai==0.3.28      
+
+# Vector Database
+chromadb==1.5.9              
+
+# Configuration
+python-dotenv==1.2.2 
+
+# Embeddings & Reranking
+sentence-transformers==5.5.1    
+transformers==5.10.2          
+torch==2.12.0                 
+accelerate==1.13.0              
+
+# Hybrid Retrieval
+rank-bm25==0.2.2         
+
+# LLM APIs
+openai==1.99.9              
+
+# RAG Evaluation
+ragas==0.4.3             
+datasets==5.0.0              
+
+# Data Processing
+numpy==2.4.6              
+pandas==2.3.3            
+
+# Real-Time Communication
+websockets==16.0 
