@@ -1,6 +1,7 @@
 # Multimodal RAG Pipeline
 
-A fully **local**, full-stack Multimodal RAG system — **Next.js** frontend, **FastAPI** backend, **LangChain**, **ChromaDB**, and **Ollama**. Upload documents (PDF, DOCX, PPTX, and more), watch them process in real-time, and chat with your documents with no cloud API dependency.
+A fully **local**, full-stack Multimodal RAG platform built with **Next.js**, **FastAPI**, **LangChain**, **ChromaDB**, and **Ollama**. Upload and query documents across 14+ file formats using hybrid retrieval, monitor processing in real time, and benchmark RAG performance with an integrated evaluation framework—all without cloud APIs.
+
 
 ---
 
