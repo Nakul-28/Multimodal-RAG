@@ -1,4 +1,4 @@
-# Multimodal RAG Pipeline
+# Multimodal RAG Platform & Evaluation Frameworke
 
 A fully **local**, full-stack Multimodal RAG platform built with **Next.js**, **FastAPI**, **LangChain**, **ChromaDB**, and **Ollama**. Upload and query documents across 14+ file formats using hybrid retrieval, monitor processing in real time, and benchmark RAG performance with an integrated evaluation framework—all without cloud APIs.
 
